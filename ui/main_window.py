@@ -7,12 +7,13 @@ import sqlite3
 import sys
 
 from PySide6.QtCore import QPropertyAnimation
-from PySide6.QtGui import QCloseEvent, QIcon, QShowEvent
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QCloseEvent, QGuiApplication, QIcon, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect, QHBoxLayout, QMainWindow, QStackedWidget, QWidget,
 )
 
-from app.config import APP_NAME, Settings
+from app.config import APP_NAME, QUEUE_FILE, Settings
 from app.history import HistoryDB, HistoryRecorder
 from app.manager import DownloadManager
 from app.notify import Notifier
@@ -25,7 +26,8 @@ from ui.home_page import HomePage
 from ui.queue_page import QueuePage
 from ui.settings_page import SettingsPage
 from ui.sidebar import Page, Sidebar
-from ui.styles import current_theme
+from ui.styles import apply_theme, current_theme
+from ui.tray import TrayController
 from ui.widgets import logo_pixmap
 
 log = logging.getLogger("quanttum.window")
@@ -34,7 +36,8 @@ log = logging.getLogger("quanttum.window")
 class MainWindow(QMainWindow):
     """Top-level window hosting navigation and all pages."""
 
-    def __init__(self, settings: Settings, history_db: HistoryDB | None = None) -> None:
+    def __init__(self, settings: Settings, history_db: HistoryDB | None = None,
+                 persist_queue: bool = False) -> None:
         super().__init__()
         self.settings = settings
         self.history_db = history_db or self._open_history()
@@ -56,7 +59,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         self.manager = DownloadManager(settings, self)
+        self._quitting = False
         self.recorder = HistoryRecorder(self.history_db, self.manager, settings, self)
+        self.tray = TrayController(self, self.manager, settings)
+        self.tray.quit_requested = self._quit_from_tray
         self.notifier = Notifier(settings, self, self.manager)
         self.sidebar = Sidebar()
         self.stack = QStackedWidget()
@@ -75,6 +81,50 @@ class MainWindow(QMainWindow):
         signals.navigate.connect(self.show_page)
         signals.theme_changed.connect(self._on_theme_changed)
         self.sidebar.set_current(Page.HOME)
+        self._install_shortcuts()
+        hints = QGuiApplication.styleHints()
+        if hints is not None:
+            hints.colorSchemeChanged.connect(self._on_system_scheme)
+        if persist_queue:
+            restored = self.manager.enable_persistence(QUEUE_FILE)
+            if restored:
+                log.info("Restored %d queued download(s)", restored)
+        if persist_queue:
+            QTimer.singleShot(4000, self.home.check_updates_on_startup)
+
+    # -- shortcuts / system theme ------------------------------------------
+    def _install_shortcuts(self) -> None:
+        self._shortcuts: list[QShortcut] = []
+
+        def add(keys: str, action) -> None:  # noqa: ANN001
+            sc = QShortcut(QKeySequence(keys), self)
+            sc.activated.connect(action)
+            self._shortcuts.append(sc)
+
+        for number in range(6):
+            add(f"Ctrl+{number + 1}", lambda n=number: self.show_page(n))
+        add("Ctrl+L", self._focus_url)
+        add("Ctrl+Shift+V", self._paste_and_analyse)
+
+    def _focus_url(self) -> None:
+        self.show_page(0)
+        self.home.url_input.setFocus()
+        self.home.url_input.selectAll()
+
+    def _paste_and_analyse(self) -> None:
+        self.show_page(0)
+        self.home.paste_and_analyse()
+
+    def _on_system_scheme(self, *_: object) -> None:
+        if self.settings.theme == "system":
+            apply_theme(QGuiApplication.instance(), "system")
+
+    def _quit_from_tray(self) -> None:
+        self._quitting = True
+        self.showNormal()
+        self.close()
+        if self.isVisible():      # the user declined the "downloads in progress" question
+            self._quitting = False
 
     @staticmethod
     def _open_history() -> HistoryDB:
@@ -139,6 +189,11 @@ class MainWindow(QMainWindow):
         self._apply_titlebar(current_theme() == "dark")
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if not self._quitting and self.tray.should_hide_on_close():
+            event.ignore()
+            self.settings.save_geometry(self.saveGeometry())
+            self.tray.hide_to_tray()
+            return
         active = self.manager.active_count()
         if active and not confirm(
             self, "Downloads in progress",

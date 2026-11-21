@@ -33,6 +33,7 @@ class MediaInfo:
     extractor: str = ""
     part_of_playlist: bool = False  # a single video whose link also names a playlist
     site: str = ""                  # display name of the source site (YouTube, Vimeo, example.com…)
+    entries: list[tuple[str, int | None]] = field(default_factory=list)  # playlist items: (title, seconds)
 
 
 # --------------------------------------------------------------------------
@@ -190,6 +191,9 @@ def build_media_info(url: str, info: dict[str, Any]) -> MediaInfo:
             thumbnail_url=thumb,
             is_playlist=True,
             entry_count=int(info.get("playlist_count") or len(entries)),
+            entries=[(str(e.get("title") or e.get("id") or f"Item {i}"),
+                      int(e["duration"]) if e.get("duration") else None)
+                     for i, e in enumerate(entries[:500], 1)],
             extractor=str(info.get("extractor_key") or ""),
             site=site_name(str(info.get("extractor_key") or ""), url),
         )

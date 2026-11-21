@@ -79,7 +79,7 @@ def main() -> int:
 
     settings = Settings()
     apply_theme(app, settings.theme)
-    window = MainWindow(settings)
+    window = MainWindow(settings, persist_queue=True)
     window.show()
     log.info("Quanttum Downloader started")
     code = app.exec()

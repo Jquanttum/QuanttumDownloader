@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, QTime
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QTimeEdit, QVBoxLayout, QWidget,
 )
 
+from app.choices import FOLDER_LAYOUTS, NAME_TEMPLATES, SPEED_LIMITS
 from app.config import (
+    ARCHIVE_PATH,
     AUDIO_FORMATS, MAX_CONCURRENT_LIMIT, VIDEO_QUALITIES, Settings, get_ytdlp_version,
     resolve_ffmpeg,
 )
@@ -34,7 +36,7 @@ class SettingsPage(BasePage):
         super().__init__("Settings", "Changes are saved automatically.")
         self.s = settings
         self.body.addWidget(self._section("Appearance", [
-            setting_row("Theme", "Choose between the dark and light interface.", self._theme_combo()),
+            setting_row("Theme", "Dark, light, or follow your system setting.", self._theme_combo()),
         ]))
         self.body.addWidget(self._section("Downloads", [
             setting_row("Download folder", "Where finished files are saved.", self._dir_control()),
@@ -45,6 +47,13 @@ class SettingsPage(BasePage):
             setting_row("Simultaneous downloads",
                         "Lower values use less memory, CPU and bandwidth. Default is 2.",
                         self._concurrency_combo()),
+            setting_row("Speed limit", "Total download speed across all downloads. Applies to downloads you start "
+                        "after changing it.", self._combo("speed_limit", list(SPEED_LIMITS))),
+            self._schedule_row(),
+            setting_row("File names", "How downloaded files are named.",
+                        self._combo("name_template", list(NAME_TEMPLATES))),
+            setting_row("Folders", "Sort downloads into subfolders by site or by channel.",
+                        self._combo("folder_layout", list(FOLDER_LAYOUTS))),
             setting_row("Embed metadata automatically",
                         "Write title, artist and other tags into downloaded files.",
                         self._toggle("embed_metadata")),
@@ -52,8 +61,15 @@ class SettingsPage(BasePage):
         self.body.addWidget(self._section("Behaviour", [
             setting_row("Clipboard detection", "Offer to use links you copy while the app is open.",
                         self._toggle("clipboard_detection")),
+            setting_row("Auto-add copied links", "Links you copy are checked and added to the queue "
+                        "automatically, using your default quality and folder. Off by default.",
+                        self._toggle("auto_queue")),
             setting_row("Notifications", "Notify when downloads finish or fail while the app is in the background.",
                         self._toggle("notifications")),
+            setting_row("Check for yt-dlp updates", "Look for a newer download engine when the app starts "
+                        "(at most once a day).", self._toggle("check_updates")),
+            setting_row("Keep running in the tray", "Closing the window keeps downloads going in the system "
+                        "tray. Quit from the tray icon.", self._toggle("close_to_tray")),
             setting_row("Keep download history", "Save finished downloads to the History page. "
                         "Turning this off doesn't erase existing history.",
                         self._toggle("keep_history")),
@@ -62,6 +78,7 @@ class SettingsPage(BasePage):
             self._ffmpeg_row(),
             self._cookies_row(),
             self._ytdlp_row(),
+            self._archive_row(),
         ]))
         self.body.addStretch(1)
 
@@ -88,11 +105,11 @@ class SettingsPage(BasePage):
     def _theme_combo(self) -> QComboBox:
         combo = ScrollSafeComboBox()
         combo.setMinimumWidth(180)
-        combo.addItems(["Dark", "Light"])
-        combo.setCurrentIndex(0 if self.s.theme == "dark" else 1)
+        combo.addItems(["Dark", "Light", "System"])
+        combo.setCurrentIndex({"dark": 0, "light": 1, "system": 2}.get(self.s.theme, 0))
 
         def changed(index: int) -> None:
-            theme = "dark" if index == 0 else "light"
+            theme = ("dark", "light", "system")[index]
             self._save("theme", theme)
             apply_theme(QApplication.instance(), theme)
 
@@ -103,8 +120,7 @@ class SettingsPage(BasePage):
         combo = ScrollSafeComboBox()
         combo.setMinimumWidth(180)
         combo.addItems(items)
-        current = getattr(self.s, key)
-        combo.setCurrentText(current)
+        combo.setCurrentText(str(self.s.get(key)))
         combo.currentTextChanged.connect(lambda text: self._save(key, text))
         return combo
 
@@ -213,6 +229,44 @@ class SettingsPage(BasePage):
         self.ffmpeg_status.setText(text)
         self.ffmpeg_status.setProperty("state", state)
         repolish(self.ffmpeg_status)
+
+    def _schedule_row(self) -> QWidget:
+        control = QWidget()
+        lay = QHBoxLayout(control)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        self.schedule_toggle = self._toggle("schedule_enabled")
+
+        def time_edit(key: str) -> QTimeEdit:
+            edit = QTimeEdit(QTime.fromString(self.s.get(key), "HH:mm"))
+            edit.setDisplayFormat("HH:mm")
+            edit.setFixedWidth(96)
+            edit.timeChanged.connect(lambda t: self._save(key, t.toString("HH:mm")))
+            return edit
+
+        self.schedule_start, self.schedule_end = time_edit("schedule_start"), time_edit("schedule_end")
+        for w in (self.schedule_toggle, self.schedule_start, make_label("to", "Dim"), self.schedule_end):
+            lay.addWidget(w)
+        return setting_row(
+            "Download schedule", "Queued downloads only run between these times and pause outside them. "
+            "Downloads you start with “Download now” ignore the schedule.", control)
+
+    def _archive_row(self) -> QWidget:
+        button = secondary_button("Forget")
+        button.setToolTip("Clears the list used by “Skip videos I've already downloaded”.")
+
+        def forget() -> None:
+            try:
+                ARCHIVE_PATH.unlink(missing_ok=True)
+            except OSError:
+                log.exception("Could not clear the download archive")
+                show_error(self, "Couldn't clear the list", "The list of downloaded videos is in use or locked.")
+                return
+            button.setText("Forgotten ✓")
+
+        button.clicked.connect(forget)
+        return setting_row("Downloaded-videos list", "Playlists can skip videos you already downloaded. "
+                           "Forget the list to download everything again.", button)
 
     def _cookies_row(self) -> QWidget:
         control = QWidget()

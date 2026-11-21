@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout
 
 from app.manager import QUEUE_STATES, DownloadJob, DownloadManager, JobState
 from ui.dialogs import confirm
 from ui.downloads_page import DownloadRow
-from ui.widgets import BasePage, Card, EmptyState, ghost_button, make_label, primary_button, secondary_button
+from ui.widgets import QUEUE_MIME, BasePage, Card, EmptyState, ghost_button, make_label, primary_button, secondary_button
 
 
 class QueuePage(BasePage):
@@ -45,6 +46,13 @@ class QueuePage(BasePage):
         self.body.addWidget(self.empty)
         self.body.addStretch(1)
 
+        self.setAcceptDrops(True)
+        self._content = self.body.parentWidget() or self
+        self.drop_line = QFrame(self._content)
+        self.drop_line.setObjectName("DropLine")
+        self.drop_line.setFixedHeight(3)
+        self.drop_line.hide()
+
         manager.job_added.connect(self._sync)
         manager.job_updated.connect(self._sync)
         manager.job_removed.connect(self._drop)
@@ -52,6 +60,73 @@ class QueuePage(BasePage):
         for job in manager.queue_jobs():
             self._sync(job)
         self._reorder()
+
+    # -- drag and drop reordering -------------------------------------------
+    @staticmethod
+    def _job_id_from(mime) -> int | None:
+        if not mime.hasFormat(QUEUE_MIME):
+            return None
+        try:
+            return int(bytes(mime.data(QUEUE_MIME)).decode())
+        except ValueError:
+            return None
+
+    def drop_index(self, y: int, dragged: int) -> int:
+        """Where to insert, among the *other* queue jobs, for a drop at ``y`` (page coordinates)."""
+        index = 0
+        for job in self.manager.queue_jobs():
+            row = self._rows.get(job.id)
+            if row is None or job.id == dragged or not row.isVisible():
+                continue
+            centre = row.mapTo(self, row.rect().center()).y()
+            if y > centre:
+                index += 1
+        return index
+
+    def _show_drop_line(self, index: int, dragged: int) -> None:
+        others = [self._rows[j.id] for j in self.manager.queue_jobs() if j.id != dragged and j.id in self._rows]
+        if not others:
+            self.drop_line.hide()
+            return
+        if index < len(others):
+            y = others[index].mapTo(self._content, others[index].rect().topLeft()).y() - 6
+        else:
+            last = others[-1]
+            y = last.mapTo(self._content, last.rect().bottomLeft()).y() + 5
+        first = others[0]
+        x = first.mapTo(self._content, first.rect().topLeft()).x()
+        self.drop_line.setGeometry(x, y, first.width(), 3)
+        self.drop_line.show()
+        self.drop_line.raise_()
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._job_id_from(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        job_id = self._job_id_from(event.mimeData())
+        if job_id is None:
+            super().dragMoveEvent(event)
+            return
+        pos = event.position().toPoint()
+        self._show_drop_line(self.drop_index(pos.y(), job_id), job_id)
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self.drop_line.hide()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self.drop_line.hide()
+        job_id = self._job_id_from(event.mimeData())
+        if job_id is None:
+            super().dropEvent(event)
+            return
+        self.manager.move_to(job_id, self.drop_index(event.position().toPoint().y(), job_id))
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
 
     def _clear(self) -> None:
         waiting = sum(1 for j in self.manager.jobs() if j.state in (JobState.QUEUED, JobState.PAUSED))
@@ -105,4 +180,5 @@ class QueuePage(BasePage):
             text = f"Queue stopped · {active} active · {waiting} waiting"
             if waiting:
                 text += " — waiting downloads won't start until you press Start queue"
-        self.state_label.setText(text)
+        schedule = self.manager.schedule_text()
+        self.state_label.setText(text + (f" · {schedule}" if schedule else ""))

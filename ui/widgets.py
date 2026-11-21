@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+    QBrush, QColor, QDrag, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
+    QAbstractButton, QApplication, QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -75,6 +75,7 @@ _ICONS: dict[str, list[tuple]] = {
         ("rrect", 3, 6, 13, 12, 2.5),
         ("poly", [(16, 10.5), (21, 7.5), (21, 16.5), (16, 13.5)], True),
     ],
+    "grip": [("dot", x, y, 1.6) for x in (9, 15) for y in (6, 12, 18)],
     "up": [("poly", [(12, 19), (12, 6)], False), ("poly", [(6.5, 11.5), (12, 6), (17.5, 11.5)], False)],
     "down": [("poly", [(12, 5), (12, 18)], False), ("poly", [(6.5, 12.5), (12, 18), (17.5, 12.5)], False)],
     "pause": [("poly", [(9, 6), (9, 18)], False), ("poly", [(15, 6), (15, 18)], False)],
@@ -302,6 +303,51 @@ class ScrollSafeComboBox(QComboBox):
             super().wheelEvent(event)
         else:
             event.ignore()   # propagates to the scroll area
+
+
+QUEUE_MIME = "application/x-quanttum-job"
+
+
+class DragHandle(IconLabel):
+    """Grip icon that starts a drag of its row (used to reorder the queue)."""
+
+    def __init__(self, job_id: int, row: QWidget) -> None:
+        super().__init__("grip", 20, "text_dim")
+        self.job_id, self._row = job_id, row
+        self._press: QPoint | None = None
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Drag to reorder")
+        self.setFixedSize(22, 40)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position().toPoint()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._press = None
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if (event.position().toPoint() - self._press).manhattanLength() < QApplication.startDragDistance():
+            return
+        self._press = None
+        mime = QMimeData()
+        mime.setData(QUEUE_MIME, str(self.job_id).encode())
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pixmap = self._row.grab()
+        faded = QPixmap(pixmap.size())
+        faded.setDevicePixelRatio(pixmap.devicePixelRatio())
+        faded.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(faded)
+        painter.setOpacity(0.75)
+        painter.drawPixmap(0, 0, pixmap)
+        painter.end()
+        drag.setPixmap(faded)
+        drag.setHotSpot(QPoint(24, faded.height() // (2 * max(1, int(faded.devicePixelRatio())))))
+        drag.exec(Qt.DropAction.MoveAction)
 
 
 class ElidedLabel(QLabel):

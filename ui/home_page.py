@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QStackedLayout, QVBoxLayout, QWidget,
 )
 
+import time
+
 from app.config import Settings, get_ytdlp_version, resolve_ffmpeg
 from app.manager import DownloadManager
 from app.media_info import (
@@ -15,10 +17,11 @@ from app.media_info import (
 )
 from app.signals import signals
 from app.downloader import DownloadRequest
+from app.updater import CheckWorker, UpdateSignals, UpdateWorker, is_newer
 from app.workers import AnalyseSignals, AnalyseWorker, BatchSignals, BatchWorker
-from ui.batch_dialog import BatchDialog
+from ui.batch_dialog import BatchChoice, BatchDialog
 from ui.dialogs import show_error
-from ui.options_panel import OptionsPanel
+from ui.options_panel import OptionsPanel, parse_default_height
 from ui.sidebar import Page
 from ui.widgets import (
     BasePage, Card, EmptyState, IconLabel, IconPushButton, ThumbnailLabel, ghost_button,
@@ -158,6 +161,8 @@ class HomePage(BasePage):
         self._batch_added = 0
         self._batch_failed: list[tuple[str, str]] = []
         self._batch_worker: BatchWorker | None = None
+        self._auto_seen: set[str] = set()
+        self._auto_pending: list[str] = []
         self.batch_progress_total = 0
         self.batch_summary: tuple[int, list[tuple[str, str]]] = (0, [])
         self.setAcceptDrops(True)
@@ -195,6 +200,28 @@ class HomePage(BasePage):
         banner_row.addWidget(dismiss_btn)
         self.banner.hide()
         self.body.addWidget(self.banner)
+
+        # yt-dlp update banner
+        self.update_banner = QFrame()
+        self.update_banner.setObjectName("Banner")
+        ub = QHBoxLayout(self.update_banner)
+        ub.setContentsMargins(14, 8, 8, 8)
+        ub.setSpacing(10)
+        ub.addWidget(IconLabel("download", 18, "accent"))
+        self.update_text = QLabel()
+        ub.addWidget(self.update_text, 1)
+        self.update_btn = secondary_button("Update now")
+        self.update_btn.clicked.connect(self._run_update)
+        self.update_dismiss = IconPushButton("", "close", role="text_dim", object_name="IconOnly", icon_size=16)
+        self.update_dismiss.setToolTip("Dismiss")
+        self.update_dismiss.clicked.connect(self.update_banner.hide)
+        ub.addWidget(self.update_btn)
+        ub.addWidget(self.update_dismiss)
+        self.update_banner.hide()
+        self.body.addWidget(self.update_banner)
+        self._update_signals = UpdateSignals(self)
+        self._update_signals.checked.connect(self._on_update_checked)
+        self._update_signals.updated.connect(self._on_update_done)
 
         # URL card
         hero = Card(shadow=True)
@@ -398,7 +425,10 @@ class HomePage(BasePage):
             return
         choice = self._batch
         done = self._batch_added + len(self._batch_failed) + 1
-        if info is None:
+        if info is not None and info.is_playlist and not choice.allow_playlists:  # type: ignore[attr-defined]
+            self._batch_failed.append((url, "Playlist links aren't added automatically. Paste it into the box "
+                                            "on Home to choose what to download."))
+        elif info is None:
             self._batch_failed.append((url, error))
         else:
             pixmap = None
@@ -430,10 +460,56 @@ class HomePage(BasePage):
                                     + (f" ({len(failed)} couldn't be added)" if failed else ""))
             self.batch_note.show()
             self.batch_queue_btn.show()
-        if failed:
+        quiet = bool(getattr(self._batch, "quiet", False))
+        if quiet and failed:
+            self.batch_note.setText((self.batch_note.text() + " · " if added else "") +
+                                    f"{len(failed)} copied link{'s' if len(failed) != 1 else ''} not added: "
+                                    + failed[0][1])
+            self.batch_note.show()
+        if failed and not quiet:
             lines = "\n".join(f"• {shorten(u, 60)}\n   {m}" for u, m in failed[:8])
             more = f"\n…and {len(failed) - 8} more." if len(failed) > 8 else ""
             show_error(self, "Some links couldn't be added", lines + more)
+        self._run_auto_pending()
+
+    # -- yt-dlp update notice ----------------------------------------------
+    def check_updates_on_startup(self, force: bool = False) -> bool:
+        """Look for a newer yt-dlp (at most once a day). Returns True if a check was started."""
+        if not force and not self.settings.get("check_updates"):
+            return False
+        now = int(time.time())
+        if not force and now - int(self.settings.get("last_update_check")) < 24 * 3600:
+            return False
+        self.settings.set("last_update_check", now)
+        QThreadPool.globalInstance().start(CheckWorker(self._update_signals))
+        return True
+
+    def _on_update_checked(self, latest: object, _error: str) -> None:
+        installed = get_ytdlp_version()
+        if latest is None or not is_newer(str(latest), installed):
+            return  # offline or up to date: stay quiet
+        self.update_text.setText(f"A newer yt-dlp is available ({latest}). Updates fix downloads "
+                                 "that stop working.")
+        self.update_btn.setEnabled(True)
+        self.update_btn.show()
+        self.update_banner.show()
+
+    def _run_update(self) -> None:
+        self.update_btn.setEnabled(False)
+        self.update_text.setText("Updating yt-dlp… this can take a minute.")
+        QThreadPool.globalInstance().start(UpdateWorker(self._update_signals))
+
+    def _on_update_done(self, ok: bool, message: str) -> None:
+        self.update_text.setText(message)
+        self.update_btn.setVisible(not ok)
+        self.update_btn.setEnabled(True)
+        self.update_banner.show()
+
+    def paste_and_analyse(self) -> None:
+        """Shortcut action: take the link from the clipboard and analyse it."""
+        self._on_paste()
+        if self.url_input.text().strip():
+            self._on_analyse()
 
     def shutdown(self) -> None:
         """Stop accepting work and wait briefly for the worker to finish."""
@@ -448,12 +524,36 @@ class HomePage(BasePage):
     def _check_clipboard(self) -> None:
         if not self.settings.clipboard_detection:
             return
-        url = first_url(QGuiApplication.clipboard().text())
+        text = QGuiApplication.clipboard().text()
+        if self.settings.get("auto_queue"):
+            self._auto_queue(text)
+            return
+        url = first_url(text)
         if not url or url in self._dismissed or url == self.url_input.text().strip():
             return
         self._clipboard_url = url
         self.banner_text.setText(f"Link on your clipboard: {shorten(url, 64)}")
         self.banner.show()
+
+    def _auto_queue(self, text: str) -> None:
+        """Clipboard auto-queue: add every new link you copy to the queue (never whole playlists)."""
+        fresh = [u for u in all_urls(text) if u not in self._auto_seen]
+        if not fresh or get_ytdlp_version() is None:
+            return
+        self._auto_seen.update(fresh)
+        self._auto_pending.extend(fresh)
+        self._run_auto_pending()
+
+    def _run_auto_pending(self) -> None:
+        if not self._auto_pending or self.batch_busy():
+            return
+        urls, self._auto_pending = self._auto_pending, []
+        self.start_batch(BatchChoice(
+            urls, "video", parse_default_height(self.settings.video_quality), self.settings.audio_format,
+            self.settings.download_dir, allow_playlists=False, quiet=True))
+
+    def batch_busy(self) -> bool:
+        return not self.batch_btn.isEnabled()
 
     def _use_clipboard_link(self) -> None:
         self._dismissed.add(self._clipboard_url)

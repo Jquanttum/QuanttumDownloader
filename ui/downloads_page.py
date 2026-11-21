@@ -9,7 +9,7 @@ from app.media_info import format_duration, human_size, shorten
 from app.system import open_path, reveal_in_folder
 from ui.dialogs import confirm, show_error
 from ui.widgets import (
-    BasePage, Card, ElidedLabel, EmptyState, IconPushButton, ThumbnailLabel, make_label,
+    BasePage, Card, DragHandle, ElidedLabel, EmptyState, IconPushButton, ThumbnailLabel, make_label,
     repolish, secondary_button,
 )
 
@@ -37,6 +37,11 @@ class DownloadRow(Card):
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 12, 12, 12)
         row.setSpacing(14)
+
+        self.handle: DragHandle | None = None
+        if queue_mode:
+            self.handle = DragHandle(job.id, self)
+            row.addWidget(self.handle)
 
         self.thumb = ThumbnailLabel(128, 72)
         self.thumb.set_pixmap(job.thumbnail)
@@ -160,6 +165,8 @@ class DownloadRow(Card):
             self.bar.setProperty("state", bar_state)
             repolish(self.bar)
         self.status.setText(self._status_text(job))
+        if self.handle is not None:
+            self.handle.setVisible(state in (JobState.QUEUED, JobState.PAUSED))
         bad = "bad" if state is JobState.FAILED else ""
         if (self.status.property("state") or "") != bad:
             self.status.setProperty("state", bad)

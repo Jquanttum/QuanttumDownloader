@@ -82,6 +82,7 @@ QLabel#Dim { font-size: 12px; color: $text_dim; }
 QLabel#MediaTitle { font-size: 18px; font-weight: 700; }
 QLabel#Error { color: $danger; font-size: 12px; }
 QLabel#Dim[state="bad"] { color: $danger; }
+QFrame#DropLine { background: $accent; border-radius: 1px; }
 QLabel#Dim[state="ok"] { color: $success; }
 QLabel[state="ok"] { color: $success; }
 QLabel[state="bad"] { color: $danger; }
@@ -105,7 +106,12 @@ QLineEdit, QPlainTextEdit {
     background: $input; border: 1px solid $border; border-radius: 10px;
     padding: 10px 14px; selection-background-color: $accent; selection-color: $on_accent;
 }
-QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid $accent; }
+QLineEdit:focus, QPlainTextEdit:focus, QTimeEdit:focus { border: 1px solid $accent; }
+QTimeEdit::up-button, QTimeEdit::down-button { width: 16px; border: none; background: transparent; }
+QTimeEdit {
+    background: $input; border: 1px solid $border; border-radius: 10px;
+    padding: 8px 8px; min-height: 20px; selection-background-color: $accent; selection-color: $on_accent;
+}
 QLineEdit:read-only { color: $text_dim; }
 QComboBox {
     background: $input; border: 1px solid $border; border-radius: 10px;
@@ -218,9 +224,21 @@ def _build_qpalette(theme: str) -> QPalette:
     return pal
 
 
+def resolve_theme(theme: str) -> str:
+    """Turn "system" into "dark"/"light" using the operating system's colour scheme."""
+    if theme == "system":
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QGuiApplication
+
+        hints = QGuiApplication.styleHints()
+        return "light" if hints is not None and hints.colorScheme() == Qt.ColorScheme.Light else "dark"
+    return theme
+
+
 def apply_theme(app: QApplication, theme: str) -> None:
-    """Apply ``theme`` to the whole application and notify listeners."""
+    """Apply ``theme`` ("dark", "light" or "system") to the whole application and notify listeners."""
     global _current
+    theme = resolve_theme(theme)
     if theme not in PALETTES:
         theme = "dark"
     _current = theme

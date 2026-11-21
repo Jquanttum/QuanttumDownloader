@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app.choices import FOLDER_LAYOUTS, NAME_TEMPLATES, trim_stamp
+from app.config import ARCHIVE_PATH
 from app.cookies import cookie_ydl_options
 from app.errors import DiskSpaceError, DownloadCancelled, MissingFFmpegError, OutputFolderError
 
@@ -62,10 +64,21 @@ class DownloadRequest:
     cookies_file: str = ""         # sign-in cookies: Netscape cookies.txt, or ""
     site: str = ""                 # display name of the source site
     unique_name: bool = False      # add the video id to the file name (set when another job has the same title)
+    name_template: str = "Title"   # key of choices.NAME_TEMPLATES
+    folder_layout: str = "Flat"    # key of choices.FOLDER_LAYOUTS
+    rate_limit: int = 0            # bytes/second for this download (0 = unlimited); set when it starts
+    trim_start: float = 0.0        # seconds; with trim_end > 0 or trim_start > 0 only that part is saved
+    trim_end: float = 0.0          # seconds; 0 = until the end
+    playlist_items: str = ""       # yt-dlp item spec such as "1,3,5-7"; "" = all
+    skip_downloaded: bool = False  # skip videos whose id is already in the download archive
 
     @property
     def is_audio(self) -> bool:
         return self.kind == "audio"
+
+    @property
+    def wants_trim(self) -> bool:
+        return not self.playlist and (self.trim_start > 0 or self.trim_end > 0)
 
     @property
     def format_label(self) -> str:
@@ -309,9 +322,15 @@ def build_options(req: DownloadRequest, ffmpeg_dir: str, tracker: _Tracker) -> t
     """Translate a request into yt-dlp options. Returns (options, notes for the user)."""
     notes: list[str] = []
     have_ffmpeg = bool(ffmpeg_dir)
-    template = "%(title)s [%(id)s].%(ext)s" if req.unique_name else "%(title)s.%(ext)s"
+    name = NAME_TEMPLATES.get(req.name_template, NAME_TEMPLATES["Title"])
+    if req.unique_name and "%(id)s" not in name:
+        name += " [%(id)s]"
+    if req.wants_trim:
+        name += f" [{trim_stamp(req.trim_start, req.trim_end or None)}]"
+    layout = FOLDER_LAYOUTS.get(req.folder_layout, "")
+    template = f"{layout}{name}.%(ext)s"
     if req.playlist:
-        template = "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"
+        template = f"{layout}%(playlist_title)s/%(playlist_index)s - {name}.%(ext)s"
 
     opts: dict[str, Any] = {
         "quiet": True,
@@ -339,6 +358,21 @@ def build_options(req: DownloadRequest, ffmpeg_dir: str, tracker: _Tracker) -> t
     if location:
         opts["ffmpeg_location"] = location
     opts.update(cookie_ydl_options(req.cookies_browser, req.cookies_file))
+    if req.rate_limit > 0:
+        opts["ratelimit"] = req.rate_limit
+    if req.playlist and req.playlist_items:
+        opts["playlist_items"] = req.playlist_items
+    if req.playlist and req.skip_downloaded:
+        ARCHIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        opts["download_archive"] = str(ARCHIVE_PATH)
+    if req.wants_trim:
+        if not have_ffmpeg:
+            raise MissingFFmpegError("trim a video")
+        from yt_dlp.utils import download_range_func
+
+        opts["download_ranges"] = download_range_func(
+            [], [(req.trim_start, req.trim_end if req.trim_end > 0 else float("inf"))])
+        opts["force_keyframes_at_cuts"] = True
 
     pps: list[dict[str, Any]] = []
     if req.is_audio:
@@ -487,6 +521,9 @@ def run_download(req: DownloadRequest, on_progress: Callable[[ProgressInfo], Non
     if req.subtitle_lang and not any(f.lower().endswith((".srt", ".vtt")) for f in files):
         notes.append(f"No subtitles were available for '{req.subtitle_lang}', so none were saved.")
     existing = [f for f in files if os.path.isfile(f)]
+    if not existing and req.playlist and req.skip_downloaded:
+        notes.append("Everything in this playlist was already downloaded, so nothing new was saved.")
+        return DownloadResult(files=[], size_bytes=0, notes=notes)
     if not existing:
         raise RuntimeError("yt-dlp finished but no output file was found")
     size = sum(os.path.getsize(f) for f in existing)

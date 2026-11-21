@@ -30,6 +30,8 @@ class BatchChoice:
     height: int | None
     audio_format: str
     output_dir: str
+    allow_playlists: bool = True   # False: playlist links are skipped (used by clipboard auto-queue)
+    quiet: bool = False            # True: no error dialog; the result is summarised on Home
 
 
 class BatchDialog(QDialog):

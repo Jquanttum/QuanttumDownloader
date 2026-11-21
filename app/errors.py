@@ -18,9 +18,9 @@ class AppError(Exception):
 class MissingFFmpegError(AppError):
     """FFmpeg is required for the requested operation but was not found."""
 
-    def __init__(self) -> None:
+    def __init__(self, purpose: str = "convert audio") -> None:
         super().__init__(
-            "FFmpeg wasn't found, and it's needed to convert audio. "
+            f"FFmpeg wasn't found, and it's needed to {purpose}. "
             "Install it or set its location in Settings, then try again."
         )
 

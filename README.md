@@ -2,7 +2,7 @@
 
 A modern, lightweight video/audio downloader (YouTube and 1000+ other sites supported by yt-dlp) for Windows built with Python, PySide6 and yt-dlp.
 
-**Current status: Phase 8 — works with any site yt-dlp supports.** Home shows the source site; *Several links* adds many links to the queue at once (or paste several links into the box); Settings → *Sign-in cookies* lets you use your own browser login or a cookies.txt for private / members-only / age-restricted media; error messages are written per situation (login needed, DRM, live stream, unsupported link…); two different videos with the same title no longer collide. Test it with `python tests/test_phase8.py`. Earlier: **Phase 7 — complete.** Added: error handling for crashes in threads/Qt, a single-instance guard, bundled-FFmpeg lookup, a PyInstaller spec (`build_exe.bat`), a Windows guide (`INSTALL_WINDOWS.md`) and fixes for clipped placeholder text and wheel-scrolling over dropdowns. Run all tests with `python tests/run_all.py`. Earlier — **Phase 6** — SQLite history (search, sort, open, show in folder, download again, remove entry *without* deleting the file, optional delete-file), notifications, and a yt-dlp update check/updater in Settings. History is stored in `data/downloads.db`. Earlier: **Phase 5** — audio (MP3/M4A/WAV, 128–320 kbps, tags + cover art) and subtitles (manual or automatic captions → .srt, saved next to the video; deleting a download also deletes them). Earlier: **Phase 4** — a real queue (Queue page: start/stop, reorder, clear; *Add to queue* vs *Download now*) and, on Downloads, **Delete file** (moves the file to the Recycle Bin after confirmation; the ✕ button only removes the list entry and never touches files). Plus link analysis and real downloads: video (MP4/MKV/WEBM, quality cap) and audio (MP3/M4A/WAV), subtitles, metadata and thumbnail embedding, playlists, pause/resume (partial files are kept), cancel, retry and a live Downloads page.
+**Current status: Phase 9 — works with any site yt-dlp supports.** Home shows the source site; *Several links* adds many links to the queue at once (or paste several links into the box); Settings → *Sign-in cookies* lets you use your own browser login or a cookies.txt for private / members-only / age-restricted media; error messages are written per situation (login needed, DRM, live stream, unsupported link…); two different videos with the same title no longer collide. Test it with `python tests/test_phase8.py`. Earlier: **Phase 7 — complete.** Added: error handling for crashes in threads/Qt, a single-instance guard, bundled-FFmpeg lookup, a PyInstaller spec (`build_exe.bat`), a Windows guide (`INSTALL_WINDOWS.md`) and fixes for clipped placeholder text and wheel-scrolling over dropdowns. Run all tests with `python tests/run_all.py`. Earlier — **Phase 6** — SQLite history (search, sort, open, show in folder, download again, remove entry *without* deleting the file, optional delete-file), notifications, and a yt-dlp update check/updater in Settings. History is stored in `data/downloads.db`. Earlier: **Phase 5** — audio (MP3/M4A/WAV, 128–320 kbps, tags + cover art) and subtitles (manual or automatic captions → .srt, saved next to the video; deleting a download also deletes them). Earlier: **Phase 4** — a real queue (Queue page: start/stop, reorder, clear; *Add to queue* vs *Download now*) and, on Downloads, **Delete file** (moves the file to the Recycle Bin after confirmation; the ✕ button only removes the list entry and never touches files). Plus link analysis and real downloads: video (MP4/MKV/WEBM, quality cap) and audio (MP3/M4A/WAV), subtitles, metadata and thumbnail embedding, playlists, pause/resume (partial files are kept), cancel, retry and a live Downloads page.
 The full queue UI, history and packaging arrive in the following phases.
 
 ## Windows installation
@@ -78,3 +78,17 @@ python tests/test_phase3.py   # needs ffmpeg + ffprobe; downloads from a local t
 * **Sign-in cookies** (Settings): choose *From browser* (Chrome, Edge, Firefox, Brave, Opera, Vivaldi, Chromium) or *From cookies.txt* (Netscape format). The app stores only the browser name / file path, never the cookies. Close the browser first if reading its cookies fails.
 * **Not possible:** DRM-protected services (Netflix, Spotify, Disney+ …). The app tells you instead of trying.
 * Only download content you own or are allowed to download, and respect each site's terms and copyright law.
+
+
+## New in Phase 9
+Saved queue between sessions, drag-and-drop queue reordering, scheduling window and speed limit, playlist picker with
+"skip already downloaded", file-name templates and folder layouts, trim to a time range (needs FFmpeg), clipboard
+auto-queue, automatic yt-dlp update check, system theme, keyboard shortcuts (Ctrl+1..6, Ctrl+L, Ctrl+Shift+V) and an
+optional tray icon.
+
+## Screenshots
+![Home](docs/home.png) ![Queue](docs/queue.png) ![Settings](docs/settings.png)
+
+## Build and CI
+`.github/workflows/ci.yml` runs the tests; `release.yml` builds the Windows zip (manual run, or push a `v*` tag to
+publish a GitHub Release). Licence: MIT (see `LICENSE`).

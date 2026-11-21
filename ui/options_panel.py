@@ -8,10 +8,12 @@ from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget,
 )
 
+from app.choices import parse_time
 from app.config import AUDIO_FORMATS, VIDEO_QUALITIES, Settings, resolve_ffmpeg
 from app.downloader import AUDIO_BITRATES, VIDEO_CONTAINERS, DownloadRequest
 from app.media_info import MediaInfo
 from app.signals import signals
+from ui.playlist_dialog import PlaylistDialog, items_spec
 from ui.widgets import (
     ScrollSafeComboBox,
     Card, SegmentedControl, ToggleSwitch, ghost_button, make_label, primary_button, repolish,
@@ -142,6 +144,43 @@ class OptionsPanel(Card):
             "This link is part of a playlist — download the whole playlist instead", self.playlist_toggle)
         lay.addWidget(self.playlist_row)
 
+        # playlist chooser (playlist links only)
+        self._selected: set[int] | None = None
+        self.skip_toggle = ToggleSwitch(True)
+        self.choose_btn = secondary_button("Choose videos…", "queue")
+        self.choose_label = make_label("All videos", "Dim")
+        self.playlist_tools = QWidget()
+        pl = QHBoxLayout(self.playlist_tools)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(14)
+        pl.addWidget(self.choose_btn)
+        pl.addWidget(self.choose_label)
+        pl.addSpacing(10)
+        pl.addWidget(_toggle_row("Skip videos I've already downloaded", self.skip_toggle))
+        pl.addStretch(1)
+        lay.addWidget(self.playlist_tools)
+        self.choose_btn.clicked.connect(self._choose_videos)
+
+        # trim (single videos and audio)
+        self.trim_start = QLineEdit()
+        self.trim_start.setPlaceholderText("Start (0:00)")
+        self.trim_end = QLineEdit()
+        self.trim_end.setPlaceholderText("End (optional)")
+        self.trim_error = make_label("", "Dim")
+        self.trim_error.setProperty("state", "bad")
+        self.trim_box = QWidget()
+        tr = QHBoxLayout(self.trim_box)
+        tr.setContentsMargins(0, 0, 0, 0)
+        tr.setSpacing(10)
+        tr.addWidget(make_label("Save only part:", "Dim"))
+        tr.addWidget(self.trim_start, 1)
+        tr.addWidget(make_label("to", "Dim"))
+        tr.addWidget(self.trim_end, 1)
+        tr.addWidget(self.trim_error, 2)
+        lay.addWidget(self.trim_box)
+        self.trim_start.textChanged.connect(lambda _t: self._refresh())
+        self.trim_end.textChanged.connect(lambda _t: self._refresh())
+
         # footer
         self.warning = make_label("", "Dim", wrap=True)
         lay.addWidget(self.warning)
@@ -213,6 +252,10 @@ class OptionsPanel(Card):
         self.folder.setToolTip(self.s.download_dir)
         self.playlist_toggle.setChecked(False)
         self.playlist_row.setVisible(info.part_of_playlist)
+        self._selected = None
+        self.skip_toggle.setChecked(True)
+        self.trim_start.clear()
+        self.trim_end.clear()
         self.show()
         self._refresh()
 
@@ -256,7 +299,53 @@ class OptionsPanel(Card):
             self.summary.setText(f"{fmt} · " + ("lossless" if fmt == "WAV" else f"{self.bitrate.currentData()} kbps"))
         else:
             self.summary.setText(f"{self.container.currentText()} · {self.quality.currentText()}")
-        self.download_btn.setText("Download playlist now" if self._wants_playlist() else "Download now")
+        wants_pl = self._wants_playlist()
+        self.download_btn.setText("Download playlist now" if wants_pl else "Download now")
+        info = self._info
+        self.playlist_tools.setVisible(wants_pl)
+        self.choose_btn.setVisible(bool(info and info.is_playlist and info.entries))
+        if info and wants_pl:
+            total = len(info.entries) or info.entry_count
+            self.choose_label.setText("All videos" if self._selected is None
+                                      else f"{len(self._selected)} of {total} videos")
+        # trimming: one video at a time, and FFmpeg must be present
+        self.trim_box.setVisible(not wants_pl and have_ffmpeg)
+        problem = self._trim_problem()
+        self.trim_error.setText(problem)
+        trim_ok = not problem
+        self.download_btn.setEnabled(self.download_btn.isEnabled() and trim_ok)
+        self.queue_btn.setEnabled(self.queue_btn.isEnabled() and trim_ok)
+
+    def _trim_problem(self) -> str:
+        if self._info is None or self._wants_playlist():
+            return ""
+        try:
+            start, end = parse_time(self.trim_start.text()), parse_time(self.trim_end.text())
+        except ValueError:
+            return "Use minutes:seconds, like 1:20"
+        if end is not None and end <= (start or 0):
+            return "The end must be after the start"
+        info = self._info
+        if info and info.duration_seconds and start and start >= info.duration_seconds:
+            return "The start is past the end of the video"
+        return ""
+
+    def _trim_values(self) -> tuple[float, float]:
+        """(start, end) seconds to save; (0, 0) when not trimming or the fields are invalid."""
+        if self._wants_playlist() or self._trim_problem():
+            return 0.0, 0.0
+        return (parse_time(self.trim_start.text()) or 0.0), (parse_time(self.trim_end.text()) or 0.0)
+
+    def _choose_videos(self) -> None:
+        info = self._info
+        if not info or not info.entries:
+            return
+        total = len(info.entries)
+        dialog = PlaylistDialog(info.title, info.entries, info.entry_count, self._selected, self)
+        if dialog.exec() == PlaylistDialog.DialogCode.Accepted and dialog.result_items is not None:
+            chosen = set(dialog.result_items)
+            self._selected = None if len(chosen) == total and total >= info.entry_count else chosen
+            self._refresh()
 
     def _wants_playlist(self) -> bool:
         info = self._info
@@ -286,6 +375,12 @@ class OptionsPanel(Card):
             embed_metadata=self.meta_toggle.isChecked(),
             embed_thumbnail=self.thumb_toggle.isChecked() and self.thumb_toggle.isEnabled(),
             playlist=self._wants_playlist(),
+            playlist_items=items_spec(sorted(self._selected), info.entry_count) if self._selected else "",
+            skip_downloaded=self._wants_playlist() and self.skip_toggle.isChecked(),
+            name_template=self.s.get("name_template"),
+            folder_layout=self.s.get("folder_layout"),
+            trim_start=self._trim_values()[0],
+            trim_end=self._trim_values()[1],
             ffmpeg_path=self._ffmpeg(),
             cookies_browser=self.s.cookie_source[0],
             cookies_file=self.s.cookie_source[1],

@@ -40,12 +40,14 @@ DATA_DIR: Path = USER_ROOT / "data"
 LOGS_DIR: Path = USER_ROOT / "logs"
 DB_PATH: Path = DATA_DIR / "downloads.db"
 LOG_FILE: Path = LOGS_DIR / "quanttum.log"
+QUEUE_FILE: Path = DATA_DIR / "queue.json"
+ARCHIVE_PATH: Path = DATA_DIR / "downloaded_ids.txt"   # ids of videos already downloaded (skip-duplicates option)
 
 VIDEO_QUALITIES: list[str] = [
     "Best available", "2160p (4K)", "1440p", "1080p", "720p", "480p", "360p",
 ]
 AUDIO_FORMATS: list[str] = ["MP3", "M4A", "WAV"]
-THEMES: tuple[str, ...] = ("dark", "light")
+THEMES: tuple[str, ...] = ("dark", "light", "system")
 MAX_CONCURRENT_LIMIT = 6
 
 DEFAULTS: dict[str, Any] = {
@@ -62,6 +64,16 @@ DEFAULTS: dict[str, Any] = {
     "cookies_mode": "Off",
     "cookies_browser": "Chrome",
     "cookies_file": "",
+    "speed_limit": "Unlimited",
+    "schedule_enabled": False,
+    "schedule_start": "01:00",
+    "schedule_end": "06:00",
+    "name_template": "Title",
+    "folder_layout": "Flat",
+    "auto_queue": False,
+    "check_updates": True,
+    "last_update_check": 0,
+    "close_to_tray": False,
 }
 
 

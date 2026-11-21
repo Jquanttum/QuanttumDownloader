@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QPixmap
 
+from app.choices import SPEED_LIMITS, in_window, parse_clock
 from app.config import MAX_CONCURRENT_LIMIT, Settings
 from app.downloader import (
     CancelToken, DownloadRequest, DownloadResult, ProgressInfo, remove_partials, run_download,
 )
 from app.errors import DownloadCancelled, friendly_message
+from app.queue_store import item_for, load_queue, request_from_dict, save_queue
 from app.signals import signals
 from app.system import move_to_trash
 
@@ -58,6 +62,8 @@ class DownloadJob:
     token: CancelToken | None = None
     stop_reason: str = ""      # "paused" | "cancelled" while a stop is pending
     manual: bool = False       # explicitly started by the user: ignores a stopped queue
+    from_queue: bool = False   # started by the queue (not by the user): may be paused by the schedule
+    auto_paused: bool = False  # paused by the schedule; resumes when the window opens again
     files_deleted: bool = False
 
     @property
@@ -125,6 +131,19 @@ class DownloadManager(QObject):
         self._sig.failed.connect(self._on_failed)
         self._sig.stopped.connect(self._on_stopped)
         signals.setting_changed.connect(self._on_setting_changed)
+        self.clock = datetime.now            # replaced in tests
+        self._store: Path | None = None
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self.save_now)
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(20_000)
+        self._tick_timer.timeout.connect(self.tick)
+        self._tick_timer.start()
+        self.queue_changed.connect(self._schedule_save)
+        self.job_added.connect(lambda _j: self._schedule_save())
+        self.job_removed.connect(lambda _i: self._schedule_save())
 
     # -- queries -----------------------------------------------------------
     def jobs(self) -> list[DownloadJob]:
@@ -207,6 +226,7 @@ class DownloadManager(QObject):
         job = self._jobs.get(job_id)
         if not job:
             return
+        job.auto_paused = False
         if job.state is JobState.QUEUED:
             job.manual = False
             self._set_state(job, JobState.PAUSED)
@@ -295,6 +315,7 @@ class DownloadManager(QObject):
 
     def shutdown(self, wait_ms: int = 8000) -> None:
         """Pause active downloads (keeping partial data) and wait for their threads."""
+        self.save_now()   # before the active jobs are paused, so they come back as "queued"
         self._closing = True
         for job in self._jobs.values():
             if job.token and job.state is JobState.ACTIVE:
@@ -302,10 +323,106 @@ class DownloadManager(QObject):
         self._pool.clear()
         self._pool.waitForDone(wait_ms)
 
+    def move_to(self, job_id: int, index: int) -> None:
+        """Put a queued job at ``index`` among the queue jobs (0 = first). Used by drag and drop."""
+        queue = [j.id for j in self.queue_jobs()]
+        if job_id not in queue:
+            return
+        index = max(0, min(index, len(queue) - 1))
+        if queue.index(job_id) == index:
+            return
+        queue.remove(job_id)
+        queue.insert(index, job_id)
+        # rewrite only the slots occupied by queue jobs, so finished jobs keep their places
+        slots = [i for i, jid in enumerate(self._order) if jid in set(queue)]
+        for slot, jid in zip(slots, queue):
+            self._order[slot] = jid
+        self.queue_changed.emit()
+
+    # -- persistence -------------------------------------------------------
+    def enable_persistence(self, path: Path) -> int:
+        """Restore the saved queue from ``path`` and keep saving it. Returns the number restored."""
+        self._store = path
+        running, items = load_queue(path)
+        restored = 0
+        if running is not None:
+            self.queue_running = running
+        for item in items:
+            request = request_from_dict(item["request"])
+            if request is None or not request.output_dir:
+                continue
+            job = self.add(request, None, start_now=False)
+            job.partials = [p for p in item.get("partials", []) if isinstance(p, str)]
+            job.manual = bool(item.get("manual"))
+            job.auto_paused = bool(item.get("auto_paused"))
+            if item.get("state") == "paused":
+                self._set_state(job, JobState.PAUSED)
+            restored += 1
+        self.queue_changed.emit()
+        self._pump()
+        return restored
+
+    def _schedule_save(self) -> None:
+        if self._store is not None and not self._closing:
+            self._save_timer.start()
+
+    def save_now(self) -> None:
+        if self._store is None:
+            return
+        items = []
+        for job in self.queue_jobs():
+            state = "paused" if job.state is JobState.PAUSED else "queued"
+            items.append(item_for(job.request, state, job.manual or job.state is JobState.ACTIVE
+                                  and not job.from_queue, job.auto_paused, job.partials))
+        save_queue(self._store, self.queue_running, items)
+
+    # -- schedule ------------------------------------------------------------
+    def schedule_enabled(self) -> bool:
+        return bool(self.settings.get("schedule_enabled"))
+
+    def schedule_open(self) -> bool:
+        """True when queued downloads may run now (always true if no schedule is set)."""
+        if not self.schedule_enabled():
+            return True
+        return in_window(self.clock().time(), parse_clock(self.settings.get("schedule_start")),
+                         parse_clock(self.settings.get("schedule_end")))
+
+    def schedule_text(self) -> str:
+        if not self.schedule_enabled():
+            return ""
+        window = f"{self.settings.get('schedule_start')}–{self.settings.get('schedule_end')}"
+        return f"Scheduled {window}" + ("" if self.schedule_open() else " · waiting for the window")
+
+    def tick(self) -> None:
+        """Called every 20 s (and on schedule changes): open/close the schedule window."""
+        if self._closing:
+            return
+        if self.schedule_open():
+            woke = [j for j in self._jobs.values() if j.state is JobState.PAUSED and j.auto_paused]
+            for job in woke:
+                job.auto_paused = False
+                self._set_state(job, JobState.QUEUED)
+            self._pump()
+        else:
+            for job in self._jobs.values():
+                if job.state is JobState.ACTIVE and job.from_queue and job.token and not job.stop_reason:
+                    job.stop_reason = "scheduled"
+                    job.phase = "Waiting for the schedule…"
+                    job.token.cancel(keep_partial=True)
+                    self.job_updated.emit(job)
+        self.queue_changed.emit()
+
+    def speed_per_download(self) -> int:
+        """Bytes/second each download may use so that all together stay under the chosen limit."""
+        total = SPEED_LIMITS.get(self.settings.get("speed_limit"), 0)
+        return total // max(1, self.settings.max_concurrent) if total else 0
+
     # -- scheduling --------------------------------------------------------
     def _on_setting_changed(self, key: str, _value: object) -> None:
         if key == "max_concurrent":
             self._pump()
+        elif key.startswith("schedule_"):
+            self.tick()
 
     def _pump(self) -> None:
         if self._closing:
@@ -314,17 +431,20 @@ class DownloadManager(QObject):
         active = self.active_count()
         waiting = [j for j in self.jobs() if j.state is JobState.QUEUED]
         waiting.sort(key=lambda j: not j.manual)  # stable: user-started jobs jump ahead
+        open_now = self.schedule_open()
         for job in waiting:
             if active >= limit:
                 break
-            if job.manual or self.queue_running:
+            if job.manual or (self.queue_running and open_now):
                 self._start(job)
                 active += 1
 
     def _start(self, job: DownloadJob) -> None:
         job.token = CancelToken()
         job.stop_reason = ""
+        job.from_queue = not job.manual
         job.manual = False
+        job.request.rate_limit = self.speed_per_download()
         job.phase = "Starting…"
         job.percent = 0.0
         self._set_state(job, JobState.ACTIVE)
@@ -370,7 +490,8 @@ class DownloadManager(QObject):
         job = self._jobs.get(job_id)
         if not job or self._closing:
             return
-        paused = job.stop_reason == "paused"
+        paused = job.stop_reason in ("paused", "scheduled")
+        job.auto_paused = job.stop_reason == "scheduled"
         job.partials = partials if paused else []
         job.speed, job.eta, job.phase, job.stop_reason = None, None, "", ""
         self._set_state(job, JobState.PAUSED if paused else JobState.CANCELLED)

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+data/
+logs/
+tests/shots/
+*.log
+*.db
+*.db-wal
+*.db-shm
+app.lock
+.idea/
+.vscode/

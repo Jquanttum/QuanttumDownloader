@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from app.cookies import cookie_ydl_options
+
 log = logging.getLogger("quanttum.media")
 
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
@@ -30,6 +32,7 @@ class MediaInfo:
     entry_count: int = 1
     extractor: str = ""
     part_of_playlist: bool = False  # a single video whose link also names a playlist
+    site: str = ""                  # display name of the source site (YouTube, Vimeo, example.com…)
 
 
 # --------------------------------------------------------------------------
@@ -39,6 +42,41 @@ def first_url(text: str) -> str | None:
     """Return the first http(s) URL found in ``text`` (only the first 2 KB is scanned)."""
     match = _URL_RE.search(text[:2048])
     return match.group(0).rstrip(").,;") if match else None
+
+
+def all_urls(text: str, limit: int = 200) -> list[str]:
+    """Every distinct http(s) link in ``text`` (any whitespace/newline separated), in order."""
+    seen: dict[str, None] = {}
+    for match in _URL_RE.finditer(text[:200_000]):
+        seen.setdefault(match.group(0).rstrip(").,;"), None)
+        if len(seen) >= limit:
+            break
+    if not seen:  # accept bare domains such as "youtu.be/abc" one per line
+        for token in text.split():
+            candidate = normalise_url(token)
+            if candidate.startswith("http") and is_valid_url(candidate):
+                seen.setdefault(candidate, None)
+    return list(seen)
+
+
+_SITE_NAMES = {
+    "youtube": "YouTube", "youtubetab": "YouTube", "youtubeplaylist": "YouTube", "tiktok": "TikTok",
+    "twitter": "X (Twitter)", "soundcloud": "SoundCloud", "vimeo": "Vimeo", "facebook": "Facebook",
+    "instagram": "Instagram", "twitch": "Twitch", "dailymotion": "Dailymotion", "reddit": "Reddit",
+    "bandcamp": "Bandcamp", "bilibili": "Bilibili", "vk": "VK", "odnoklassniki": "OK.ru",
+    "mixcloud": "Mixcloud", "streamable": "Streamable", "rumble": "Rumble", "linkedin": "LinkedIn",
+}
+
+
+def site_name(extractor: str, url: str) -> str:
+    """Friendly site name from yt-dlp's extractor key, falling back to the link's host."""
+    key = re.sub(r"(Playlist|Tab|User|Channel|Album|Set|Live|Clip|Short)s?$", "", extractor or "")
+    low = key.lower() or (extractor or "").lower()
+    if low in _SITE_NAMES:
+        return _SITE_NAMES[low]
+    if not extractor or extractor.lower() == "generic":
+        return host_of(url) or "Web"
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", key or extractor)
 
 
 def normalise_url(text: str) -> str:
@@ -153,6 +191,7 @@ def build_media_info(url: str, info: dict[str, Any]) -> MediaInfo:
             is_playlist=True,
             entry_count=int(info.get("playlist_count") or len(entries)),
             extractor=str(info.get("extractor_key") or ""),
+            site=site_name(str(info.get("extractor_key") or ""), url),
         )
 
     formats = info.get("formats") or []
@@ -173,10 +212,11 @@ def build_media_info(url: str, info: dict[str, Any]) -> MediaInfo:
         has_audio=has_audio,
         subtitle_langs=sorted((info.get("subtitles") or {}).keys()),
         extractor=str(info.get("extractor_key") or ""),
+        site=site_name(str(info.get("extractor_key") or ""), url),
     )
 
 
-def analyse_url(url: str) -> MediaInfo:
+def analyse_url(url: str, cookies_browser: str = "", cookies_file: str = "") -> MediaInfo:
     """Fetch metadata for ``url`` with yt-dlp (blocking — call from a worker thread).
 
     Raises whatever yt-dlp raises; callers translate it with ``errors.friendly_message``.
@@ -194,6 +234,7 @@ def analyse_url(url: str) -> MediaInfo:
         "retries": 2,
         "logger": _YtdlpLogger(),
     }
+    options.update(cookie_ydl_options(cookies_browser, cookies_file))
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=False)
     if not info:

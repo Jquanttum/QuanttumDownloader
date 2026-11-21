@@ -92,7 +92,7 @@ def test_gui() -> None:
     shots.mkdir(exist_ok=True)
 
     # 1) success path with mocked extractor + thumbnail
-    workers.analyse_url = lambda url: MediaInfo(
+    workers.analyse_url = lambda url, *cookies: MediaInfo(
         url=url, title="A Demo Video About Forensic Science", channel="Quanttum Labs",
         duration_seconds=754, thumbnail_url="https://x/t.jpg",
         video_heights=[2160, 1080, 720, 480, 360], subtitle_langs=["en", "fr"], extractor="Youtube")
@@ -109,7 +109,7 @@ def test_gui() -> None:
     print("success path OK")
 
     # 2) failure path with a private-video style error
-    def boom(url: str):
+    def boom(url: str, *cookies):
         raise RuntimeError("ERROR: [youtube] abc: Private video. Sign in if you've been granted access")
 
     workers.analyse_url = boom

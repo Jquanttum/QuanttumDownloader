@@ -287,6 +287,9 @@ class OptionsPanel(Card):
             embed_thumbnail=self.thumb_toggle.isChecked() and self.thumb_toggle.isEnabled(),
             playlist=self._wants_playlist(),
             ffmpeg_path=self._ffmpeg(),
+            cookies_browser=self.s.cookie_source[0],
+            cookies_file=self.s.cookie_source[1],
+            site=info.site,
         )
 
     def _emit_request(self, start_now: bool) -> None:

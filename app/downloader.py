@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app.cookies import cookie_ydl_options
 from app.errors import DiskSpaceError, DownloadCancelled, MissingFFmpegError, OutputFolderError
 
 log = logging.getLogger("quanttum.downloader")
@@ -57,6 +58,10 @@ class DownloadRequest:
     embed_thumbnail: bool = True
     playlist: bool = False
     ffmpeg_path: str = ""          # resolved ffmpeg executable, or "" when unavailable
+    cookies_browser: str = ""      # sign-in cookies: browser name, or ""
+    cookies_file: str = ""         # sign-in cookies: Netscape cookies.txt, or ""
+    site: str = ""                 # display name of the source site
+    unique_name: bool = False      # add the video id to the file name (set when another job has the same title)
 
     @property
     def is_audio(self) -> bool:
@@ -304,7 +309,7 @@ def build_options(req: DownloadRequest, ffmpeg_dir: str, tracker: _Tracker) -> t
     """Translate a request into yt-dlp options. Returns (options, notes for the user)."""
     notes: list[str] = []
     have_ffmpeg = bool(ffmpeg_dir)
-    template = "%(title)s.%(ext)s"
+    template = "%(title)s [%(id)s].%(ext)s" if req.unique_name else "%(title)s.%(ext)s"
     if req.playlist:
         template = "%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s"
 
@@ -333,6 +338,7 @@ def build_options(req: DownloadRequest, ffmpeg_dir: str, tracker: _Tracker) -> t
     location = _ffmpeg_location(ffmpeg_dir)
     if location:
         opts["ffmpeg_location"] = location
+    opts.update(cookie_ydl_options(req.cookies_browser, req.cookies_file))
 
     pps: list[dict[str, Any]] = []
     if req.is_audio:

@@ -13,6 +13,7 @@ from datetime import datetime
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
 
+from app.config import Settings
 from app.downloader import DownloadRequest
 from app.history import SORTS, HistoryDB, HistoryEntry, HistoryRecorder
 from app.manager import DownloadManager
@@ -63,8 +64,10 @@ class HistoryRow(Card):
         col.setSpacing(4)
         self.title = ElidedLabel(entry.title, "RowTitle")
         when = datetime.fromtimestamp(entry.completed_at).strftime("%d %b %Y, %H:%M")
+        site = str(entry.request.get("site") or "")
         self.meta = ElidedLabel(
-            f"{entry.format_label} · {entry.quality_label} · {human_size(entry.size_bytes)} · {when}", "Dim")
+            " · ".join(p for p in (site, entry.format_label, entry.quality_label,
+                                    human_size(entry.size_bytes), when) if p), "Dim")
         if entry.files_deleted:
             status, bad = "File deleted from disk", False
         elif not entry.files or not self.exists:
@@ -225,6 +228,7 @@ class HistoryPage(BasePage):
         if not request:
             show_error(self, "Can't download again", "The saved details for this download are incomplete.")
             return
+        request.cookies_browser, request.cookies_file = Settings().cookie_source   # current sign-in choice
         self.manager.add(request, start_now=True)
         signals.navigate.emit(1)
 

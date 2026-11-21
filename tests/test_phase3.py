@@ -44,6 +44,9 @@ RANGES: list[str] = []
 # --------------------------------------------------------------------------
 # local server with Range support and optional throttling
 # --------------------------------------------------------------------------
+PROTECTED: set[str] = set()   # paths that need the cookie ``session=abc`` (tests of sign-in cookies)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -57,7 +60,13 @@ class Handler(BaseHTTPRequestHandler):
         self._serve(head=False)
 
     def _serve(self, head: bool) -> None:
-        entry = FILES.get(self.path.split("?")[0])
+        path = self.path.split("?")[0]
+        if path in PROTECTED and "session=abc" not in self.headers.get("Cookie", ""):
+            self.send_response(403)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        entry = FILES.get(path)
         if not entry:
             self.send_response(404)
             self.send_header("Content-Length", "0")

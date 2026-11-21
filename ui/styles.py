@@ -91,6 +91,7 @@ QLabel#Chip {
 }
 QLabel#Chip[state="ok"] { background: $success_soft; color: $success; }
 QLabel#Chip[state="bad"] { background: $danger_soft; color: $danger; }
+QLabel#Chip[state="accent"] { background: $accent_soft; color: $accent; }
 
 /* ---- surfaces ---- */
 QFrame#Card { background: $card; border: 1px solid $border; border-radius: 14px; }
@@ -100,11 +101,11 @@ QScrollArea { background: transparent; border: none; }
 QWidget#ScrollContent { background: transparent; }
 
 /* ---- inputs ---- */
-QLineEdit {
+QLineEdit, QPlainTextEdit {
     background: $input; border: 1px solid $border; border-radius: 10px;
     padding: 10px 14px; selection-background-color: $accent; selection-color: $on_accent;
 }
-QLineEdit:focus { border: 1px solid $accent; }
+QLineEdit:focus, QPlainTextEdit:focus { border: 1px solid $accent; }
 QLineEdit:read-only { color: $text_dim; }
 QComboBox {
     background: $input; border: 1px solid $border; border-radius: 10px;

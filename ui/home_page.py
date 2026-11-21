@@ -11,10 +11,13 @@ from PySide6.QtWidgets import (
 from app.config import Settings, get_ytdlp_version, resolve_ffmpeg
 from app.manager import DownloadManager
 from app.media_info import (
-    MediaInfo, first_url, format_duration, host_of, is_valid_url, normalise_url, shorten,
+    MediaInfo, all_urls, first_url, format_duration, host_of, is_valid_url, normalise_url, shorten,
 )
 from app.signals import signals
-from app.workers import AnalyseSignals, AnalyseWorker
+from app.downloader import DownloadRequest
+from app.workers import AnalyseSignals, AnalyseWorker, BatchSignals, BatchWorker
+from ui.batch_dialog import BatchDialog
+from ui.dialogs import show_error
 from ui.options_panel import OptionsPanel
 from ui.sidebar import Page
 from ui.widgets import (
@@ -24,7 +27,7 @@ from ui.widgets import (
 
 INVALID_URL_MESSAGE = (
     "That doesn't look like a valid link. Paste a full address, "
-    "for example https://www.youtube.com/watch?v=…"
+    "for example https://example.com/watch?v=…"
 )
 MISSING_YTDLP_MESSAGE = "yt-dlp isn't installed. Run: pip install -U yt-dlp"
 
@@ -103,6 +106,8 @@ class PreviewCard(Card):
         self.channel.setText(info.channel or host_of(info.url))
 
         chips: list[tuple[str, str]] = []
+        if info.site:
+            chips.append((info.site, "accent"))
         if info.is_playlist:
             chips.append((f"Playlist · {info.entry_count} videos", ""))
         else:
@@ -145,6 +150,16 @@ class HomePage(BasePage):
         self._worker_signals = AnalyseSignals(self)
         self._worker_signals.finished.connect(self._on_analysis_done)
         self._worker_signals.failed.connect(self._on_analysis_failed)
+        self._batch_signals = BatchSignals(self)
+        self._batch_signals.item.connect(self._on_batch_item)
+        self._batch_signals.finished.connect(self._on_batch_finished)
+        self._batch_id = 0
+        self._batch: object = None
+        self._batch_added = 0
+        self._batch_failed: list[tuple[str, str]] = []
+        self._batch_worker: BatchWorker | None = None
+        self.batch_progress_total = 0
+        self.batch_summary: tuple[int, list[tuple[str, str]]] = (0, [])
         self.setAcceptDrops(True)
 
         # header
@@ -156,7 +171,8 @@ class HomePage(BasePage):
         titles = QVBoxLayout()
         titles.setSpacing(0)
         titles.addWidget(make_label("Quanttum Downloader", "Title"))
-        titles.addWidget(make_label("Save videos and audio you are authorised to download.", "Subtitle"))
+        titles.addWidget(make_label("Save video and audio from 1000+ sites — only what you're allowed to download.",
+                                    "Subtitle"))
         header.addWidget(logo)
         header.addLayout(titles, 1)
         self.body.addLayout(header)
@@ -189,7 +205,7 @@ class HomePage(BasePage):
         url_row = QHBoxLayout()
         url_row.setSpacing(10)
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("https://www.youtube.com/watch?v=…")
+        self.url_input.setPlaceholderText("Paste a video, audio or playlist link…")
         self.url_input.setClearButtonEnabled(True)
         self.url_input.returnPressed.connect(self._on_analyse)
         self.url_input.textChanged.connect(lambda _t: self._set_error(""))
@@ -198,12 +214,26 @@ class HomePage(BasePage):
         self.analyse_btn = primary_button("Analyse", "search")
         self.analyse_btn.clicked.connect(self._on_analyse)
         url_row.addWidget(self.url_input, 1)
+        self.batch_btn = secondary_button("Several links", "queue")
+        self.batch_btn.setToolTip("Paste many links and add them all to the queue")
+        self.batch_btn.clicked.connect(lambda: self.open_batch())
         url_row.addWidget(paste_btn)
+        url_row.addWidget(self.batch_btn)
         url_row.addWidget(self.analyse_btn)
         hero_lay.addLayout(url_row)
         self.error_label = make_label("", "Error", wrap=True)
         self.error_label.hide()
         hero_lay.addWidget(self.error_label)
+        note_row = QHBoxLayout()
+        self.batch_note = make_label("", "Dim", wrap=True)
+        self.batch_note.setProperty("state", "ok")
+        self.batch_note.hide()
+        self.batch_queue_btn = ghost_button("View queue", "queue")
+        self.batch_queue_btn.clicked.connect(lambda: signals.navigate.emit(int(Page.QUEUE)))
+        self.batch_queue_btn.hide()
+        note_row.addWidget(self.batch_note, 1)
+        note_row.addWidget(self.batch_queue_btn)
+        hero_lay.addLayout(note_row)
         hero_lay.addWidget(make_label(
             "Tip: drag a link onto this window, or copy one and we'll offer to use it.", "Dim"))
         self.body.addWidget(hero)
@@ -271,10 +301,16 @@ class HomePage(BasePage):
         if not text:
             self._set_error("Your clipboard is empty.")
             return
+        if len(all_urls(text)) > 1:
+            self.open_batch(text)
+            return
         self.url_input.setText(first_url(text) or text[:2048])
         self.url_input.setFocus()
 
     def _on_analyse(self) -> None:
+        if len(all_urls(self.url_input.text())) > 1:   # several links pasted into the box
+            self.open_batch(self.url_input.text())
+            return
         url = normalise_url(self.url_input.text())
         if not url or not is_valid_url(url):
             self._set_error(INVALID_URL_MESSAGE)
@@ -291,7 +327,7 @@ class HomePage(BasePage):
         self.preview.show_loading(url)
         self.analyse_btn.setEnabled(False)
         self.analyse_btn.setText("Analysing…")
-        self._pool.start(AnalyseWorker(url, self._token, self._worker_signals))
+        self._pool.start(AnalyseWorker(url, self._token, self._worker_signals, *self.settings.cookie_source))
         signals.url_submitted.emit(url)
 
     def _finish_busy(self) -> None:
@@ -329,9 +365,82 @@ class HomePage(BasePage):
             position = len(self.manager.queue_jobs())
             self.options.show_queued(position)
 
+    # -- several links at once ---------------------------------------------
+    def open_batch(self, text: str = "") -> None:
+        """Ask for a list of links and queue them all (analysed one by one in the background)."""
+        if get_ytdlp_version() is None:
+            self._set_error(MISSING_YTDLP_MESSAGE)
+            return
+        dialog = BatchDialog(self.settings, self, text)
+        if dialog.exec() != BatchDialog.DialogCode.Accepted or dialog.choice is None:
+            return
+        self.start_batch(dialog.choice)
+
+    def start_batch(self, choice: object) -> None:
+        self._batch = choice
+        self._batch_id += 1
+        self._batch_added, self._batch_failed = 0, []
+        self.batch_note.hide()
+        self.batch_queue_btn.hide()
+        total = len(choice.urls)  # type: ignore[attr-defined]
+        self.batch_progress_total = total
+        self._set_error("")
+        self.url_input.clear()
+        self.batch_btn.setEnabled(False)
+        self.batch_btn.setText(f"Adding 0/{total}…")
+        worker = BatchWorker(self._batch_id, list(choice.urls), self._batch_signals,  # type: ignore[attr-defined]
+                             *self.settings.cookie_source)
+        self._batch_worker = worker
+        self._pool.start(worker)
+
+    def _on_batch_item(self, batch_id: int, url: str, info: object, thumb: object, error: str) -> None:
+        if batch_id != self._batch_id:
+            return
+        choice = self._batch
+        done = self._batch_added + len(self._batch_failed) + 1
+        if info is None:
+            self._batch_failed.append((url, error))
+        else:
+            pixmap = None
+            if thumb:
+                pixmap = QPixmap()
+                if not pixmap.loadFromData(thumb):
+                    pixmap = None
+            browser, cookie_file = self.settings.cookie_source
+            request = DownloadRequest(
+                url=url, title=info.title, kind=choice.kind, height=choice.height,  # type: ignore[attr-defined]
+                audio_format=choice.audio_format, audio_bitrate="192",  # type: ignore[attr-defined]
+                output_dir=choice.output_dir, embed_metadata=self.settings.embed_metadata,  # type: ignore[attr-defined]
+                embed_thumbnail=True, playlist=info.is_playlist,
+                ffmpeg_path=str(resolve_ffmpeg(self.settings.ffmpeg_path) or ""),
+                cookies_browser=browser, cookies_file=cookie_file, site=info.site)
+            self.manager.add(request, pixmap, start_now=False)
+            self._batch_added += 1
+        self.batch_btn.setText(f"Adding {done}/{self.batch_progress_total}…")
+
+    def _on_batch_finished(self, batch_id: int) -> None:
+        if batch_id != self._batch_id:
+            return
+        self.batch_btn.setEnabled(True)
+        self.batch_btn.setText("Several links")
+        added, failed = self._batch_added, self._batch_failed
+        self.batch_summary = (added, list(failed))
+        if added:
+            self.batch_note.setText(f"Added {added} link{'s' if added != 1 else ''} to the queue"
+                                    + (f" ({len(failed)} couldn't be added)" if failed else ""))
+            self.batch_note.show()
+            self.batch_queue_btn.show()
+        if failed:
+            lines = "\n".join(f"• {shorten(u, 60)}\n   {m}" for u, m in failed[:8])
+            more = f"\n…and {len(failed) - 8} more." if len(failed) > 8 else ""
+            show_error(self, "Some links couldn't be added", lines + more)
+
     def shutdown(self) -> None:
         """Stop accepting work and wait briefly for the worker to finish."""
         self._token += 1  # discard any in-flight result
+        self._batch_id += 1
+        if self._batch_worker:
+            self._batch_worker.cancelled = True
         self._pool.clear()
         self._pool.waitForDone(3000)
 

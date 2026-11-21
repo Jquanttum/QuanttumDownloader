@@ -31,6 +31,9 @@ The app looks for FFmpeg in this order: the path set in **Settings**, a folder c
 * copy `ffmpeg.exe` **and** `ffprobe.exe` into an `ffmpeg` folder next to `QuanttumDownloader.exe` (or the project folder), or
 * choose the unzipped `bin` folder in **Settings → FFmpeg location**.
 
+## Sites that need a login
+Open **Settings → Sign-in cookies**. Either pick your browser (log in to the site in that browser first, then close it) or export a `cookies.txt` with a browser extension and choose the file. Use only your own account.
+
 ## Updating yt-dlp
 Sites change often. If downloads start failing, open **Settings → yt-dlp → Check for updates → Update**, then restart.
 (The standalone `.exe` can't update itself: rebuild with `build_exe.bat`, which fetches the newest yt-dlp.)

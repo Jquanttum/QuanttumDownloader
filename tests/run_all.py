@@ -7,7 +7,7 @@ from pathlib import Path
 here = Path(__file__).resolve().parent
 env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
 failed = []
-for n in range(2, 8):
+for n in range(2, 9):
     script = here / f"test_phase{n}.py"
     if not script.exists():
         continue

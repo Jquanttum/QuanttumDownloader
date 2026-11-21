@@ -159,6 +159,10 @@ class DownloadManager(QObject):
                     existing.manual = True
                     self._pump()
                 return existing
+        if any(j.request.output_dir == request.output_dir and j.title == request.title
+               and j.request.url != request.url and not request.playlist and not j.request.playlist
+               and j.state not in (JobState.CANCELLED, JobState.FAILED) for j in self._jobs.values()):
+            request.unique_name = True   # different media, same title, same folder: keep both files
         if thumbnail is not None and not thumbnail.isNull():
             thumbnail = thumbnail.scaled(
                 256, 144, Qt.AspectRatioMode.KeepAspectRatioByExpanding,

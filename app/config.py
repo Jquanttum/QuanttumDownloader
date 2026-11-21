@@ -59,6 +59,9 @@ DEFAULTS: dict[str, Any] = {
     "keep_history": True,
     "embed_metadata": True,
     "ffmpeg_path": "",
+    "cookies_mode": "Off",
+    "cookies_browser": "Chrome",
+    "cookies_file": "",
 }
 
 
@@ -135,6 +138,13 @@ class Settings:
     @property
     def notifications(self) -> bool:
         return self.get("notifications")
+
+    @property
+    def cookie_source(self) -> tuple[str, str]:
+        """(browser, cookies_file) to use for sign-in cookies; both empty when disabled."""
+        from app.cookies import cookie_settings
+
+        return cookie_settings(self.get("cookies_mode"), self.get("cookies_browser"), self.get("cookies_file"))
 
     @property
     def keep_history(self) -> bool:

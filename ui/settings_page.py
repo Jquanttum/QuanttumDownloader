@@ -14,6 +14,7 @@ from app.config import (
     AUDIO_FORMATS, MAX_CONCURRENT_LIMIT, VIDEO_QUALITIES, Settings, get_ytdlp_version,
     resolve_ffmpeg,
 )
+from app.cookies import BROWSERS as COOKIE_BROWSERS, MODES as COOKIE_MODES, check_cookies_file
 from app.signals import signals
 from app.updater import CheckWorker, UpdateSignals, UpdateWorker, is_newer
 from ui.dialogs import show_error
@@ -59,6 +60,7 @@ class SettingsPage(BasePage):
         ]))
         self.body.addWidget(self._section("Tools", [
             self._ffmpeg_row(),
+            self._cookies_row(),
             self._ytdlp_row(),
         ]))
         self.body.addStretch(1)
@@ -211,6 +213,73 @@ class SettingsPage(BasePage):
         self.ffmpeg_status.setText(text)
         self.ffmpeg_status.setProperty("state", state)
         repolish(self.ffmpeg_status)
+
+    def _cookies_row(self) -> QWidget:
+        control = QWidget()
+        lay = QHBoxLayout(control)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        self.cookie_mode = ScrollSafeComboBox()
+        self.cookie_mode.addItems(COOKIE_MODES)
+        self.cookie_mode.setCurrentText(self.s.get("cookies_mode"))
+        self.cookie_browser = ScrollSafeComboBox()
+        self.cookie_browser.addItems(COOKIE_BROWSERS)
+        self.cookie_browser.setCurrentText(self.s.get("cookies_browser"))
+        self.cookie_file = QLineEdit(self.s.get("cookies_file"))
+        self.cookie_file.setPlaceholderText("cookies.txt")
+        self.cookie_file.setMinimumWidth(160)
+        self.cookie_pick = secondary_button("Browse…", "folder")
+        for w in (self.cookie_mode, self.cookie_browser, self.cookie_file, self.cookie_pick):
+            lay.addWidget(w, 1 if w is self.cookie_file else 0)
+
+        self.cookie_status = make_label("", "Dim", wrap=True)
+        wrapper = QWidget()
+        wl = QVBoxLayout(wrapper)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(0)
+        wl.addWidget(setting_row(
+            "Sign-in cookies",
+            "For sites that need a login (private, members-only or age-restricted media). Use only your own "
+            "account. Cookies are read when needed and never stored by this app.",
+            control))
+        wl.addWidget(self.cookie_status)
+        wl.addSpacing(8)
+
+        def commit() -> None:
+            self._save("cookies_mode", self.cookie_mode.currentText())
+            self._save("cookies_browser", self.cookie_browser.currentText())
+            self._save("cookies_file", self.cookie_file.text().strip())
+            self._refresh_cookies()
+
+        def pick() -> None:
+            path, _ = QFileDialog.getOpenFileName(self, "Select cookies.txt", "", "Text files (*.txt);;All files (*)")
+            if path:
+                self.cookie_file.setText(path)
+                commit()
+
+        self.cookie_mode.currentTextChanged.connect(lambda _t: commit())
+        self.cookie_browser.currentTextChanged.connect(lambda _t: commit())
+        self.cookie_file.editingFinished.connect(commit)
+        self.cookie_pick.clicked.connect(pick)
+        self._refresh_cookies()
+        return wrapper
+
+    def _refresh_cookies(self) -> None:
+        mode = self.cookie_mode.currentText()
+        self.cookie_browser.setVisible(mode == "From browser")
+        self.cookie_file.setVisible(mode == "From cookies.txt")
+        self.cookie_pick.setVisible(mode == "From cookies.txt")
+        problem, text = "", ""
+        if mode == "From cookies.txt":
+            problem = check_cookies_file(self.cookie_file.text().strip())
+            text = problem or "Cookies file looks good."
+        elif mode == "From browser":
+            text = (f"Cookies will be read from {self.cookie_browser.currentText()}. "
+                    "If that fails, close the browser first or use a cookies.txt file instead.")
+        self.cookie_status.setText(text)
+        self.cookie_status.setVisible(bool(text))
+        self.cookie_status.setProperty("state", "bad" if problem else "")
+        repolish(self.cookie_status)
 
     def _ytdlp_row(self) -> QWidget:
         control = QWidget()

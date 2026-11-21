@@ -39,16 +39,50 @@ class AnalyseSignals(QObject):
 class AnalyseWorker(QRunnable):
     """Extracts metadata and thumbnail for one URL off the GUI thread."""
 
-    def __init__(self, url: str, token: int, signals: AnalyseSignals) -> None:
+    def __init__(self, url: str, token: int, signals: AnalyseSignals,
+                 cookies_browser: str = "", cookies_file: str = "") -> None:
         super().__init__()
         self.url, self.token, self.signals = url, token, signals
+        self.cookies = (cookies_browser, cookies_file)
 
     def run(self) -> None:
         try:
-            info: MediaInfo = analyse_url(self.url)
+            info: MediaInfo = analyse_url(self.url, *self.cookies)
         except Exception as exc:  # noqa: BLE001 - anything yt-dlp raises becomes a friendly message
             log.warning("Analysis failed for %s: %s", self.url, exc, exc_info=True)
             self.signals.failed.emit(self.token, friendly_message(exc))
             return
         thumb = fetch_thumbnail(info.thumbnail_url) if info.thumbnail_url else None
         self.signals.finished.emit(self.token, info, thumb)
+
+
+class BatchSignals(QObject):
+    """Signals for :class:`BatchWorker`."""
+
+    item = Signal(int, str, object, object, str)  # batch id, url, MediaInfo|None, thumbnail|None, friendly error
+    finished = Signal(int)                         # batch id
+
+
+class BatchWorker(QRunnable):
+    """Analyses many links one after another (one at a time keeps CPU and network use low)."""
+
+    def __init__(self, batch_id: int, urls: list[str], signals: BatchSignals,
+                 cookies_browser: str = "", cookies_file: str = "") -> None:
+        super().__init__()
+        self.batch_id, self.urls, self.signals = batch_id, urls, signals
+        self.cookies = (cookies_browser, cookies_file)
+        self.cancelled = False
+
+    def run(self) -> None:
+        for url in self.urls:
+            if self.cancelled:
+                break
+            try:
+                info = analyse_url(url, *self.cookies)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Batch analysis failed for %s: %s", url, exc, exc_info=True)
+                self.signals.item.emit(self.batch_id, url, None, None, friendly_message(exc))
+                continue
+            thumb = fetch_thumbnail(info.thumbnail_url) if info.thumbnail_url else None
+            self.signals.item.emit(self.batch_id, url, info, thumb, "")
+        self.signals.finished.emit(self.batch_id)
